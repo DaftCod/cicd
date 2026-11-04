@@ -50,6 +50,8 @@ services:
     build: ./Java-app/back-end
     image: javaapp-backend:1.0
     env_file: [./Java-app/back-end/.env]
+    environment:
+      DEBUG: "false"
     init: true
     depends_on:
       db:    { condition: service_healthy }
