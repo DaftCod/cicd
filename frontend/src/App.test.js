@@ -1,8 +1,18 @@
 import { render, screen } from '@testing-library/react';
 import App from './App';
+import { getPostData } from './api/api-connector';
 
-test('renders learn react link', () => {
+jest.mock('./api/api-connector');
+
+beforeEach(() => {
+  getPostData.mockResolvedValue([]);
+});
+
+test('shows empty state when there are no posts', async () => {
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+
+  expect(await screen.findByText(/нет постов/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /добавить пост/i })).toBeInTheDocument();
+
+  expect(getPostData).toHaveBeenCalledTimes(1);
 });

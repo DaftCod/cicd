@@ -1,4 +1,3 @@
-import logo from './logo.svg';
 import './App.css';
 import PrivateArea from "./components/private-area";
 import {BrowserRouter, Routes, Route} from 'react-router-dom'
