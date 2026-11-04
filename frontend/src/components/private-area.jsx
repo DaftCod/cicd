@@ -22,16 +22,19 @@ const PrivateArea = () => {
         const fetchData = async () => {
             try {
                 const response = await getPostData();
-                console.log("fetchData: " + response)
-                await setPostData(response);
+                console.log("fetchData: ", response)
+                setPostData(response);
             } catch (err) {
                 console.error("Error fetching data:", err);
             }
         };
 
         fetchData();
-        console.log(postData);
     }, []);
+
+    useEffect(() => {
+        console.log("postData updated:", postData);
+    }, [postData]);
 
 
     return (
