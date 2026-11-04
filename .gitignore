@@ -1,0 +1,13 @@
+.env
+.env.*
+
+backend/build/
+backend/.gradle/
+.gradle/
+
+frontend/node_modules/
+frontend/build/
+frontend/.npm/
+
+.idea/
+.DS_Store
