@@ -10,6 +10,7 @@ stages:
   - lint
   - test
   - build
+  - verify
   - release
 
 nginx-lint:
@@ -101,9 +102,22 @@ frontend-test:
 backend-test:
   stage: test
   image: eclipse-temurin:21-jdk
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: app
+        POSTGRES_USER: app
+        POSTGRES_PASSWORD: ci_test
+    - name: redis:7-alpine
+      alias: redis
   variables:
     GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
     GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+    SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/app
+    SPRING_DATASOURCE_USERNAME: app
+    SPRING_DATASOURCE_PASSWORD: ci_test
+    SPRING_DATA_REDIS_HOST: redis
   cache:
     key:
       files: [backend/build.gradle.kts, backend/gradle/wrapper/gradle-wrapper.properties]
@@ -117,7 +131,6 @@ backend-test:
       junit: backend/build/test-results/test/**/TEST-*.xml
   rules:
     - changes: [backend/**/*]
-
 # ─────────────── RELEASE ───────────────
 release-images:
   stage: release
@@ -131,3 +144,37 @@ release-images:
       done
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+
+smoke-test:
+  stage: verify
+  image:
+    name: curlimages/curl:8.11.1
+    entrypoint: [""]
+  variables:
+    FF_NETWORK_PER_BUILD: "true"
+    CI_DEBUG_SERVICES: "true"
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: app
+        POSTGRES_USER: app
+        POSTGRES_PASSWORD: ci_smoke
+    - name: redis:7-alpine
+      alias: redis
+    - name: $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA
+      alias: backend
+      variables:
+        SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/app
+        SPRING_DATASOURCE_USERNAME: app
+        SPRING_DATASOURCE_PASSWORD: ci_smoke
+        SPRING_DATA_REDIS_HOST: redis
+        SPRING_DATASOURCE_HIKARI_INITIALIZATIONFAILTIMEOUT: "60000"
+    - name: $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
+      alias: frontend
+  script:
+    - curl -sS -o /dev/null --retry 40 --retry-delay 3 --retry-connrefused http://backend:8080/
+    - curl -fsS -o /dev/null http://frontend/
+    - 'code=$(curl -s -o /dev/null -w "%{http_code}" http://frontend/api/); echo "nginx -> backend: HTTP $code"; [ "$code" != "502" ] && [ "$code" != "504" ]'
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
