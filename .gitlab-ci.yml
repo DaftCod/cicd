@@ -34,7 +34,8 @@ nginx-lint:
     DOCKER_TLS_CERTDIR: "/certs"
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker buildx create --use --driver docker-container
+    - docker context create ci-context
+    - docker buildx create --name ci-builder --driver docker-container --use ci-context
   script:
     - >
       docker buildx build
