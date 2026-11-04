@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Button, Container, Form } from 'react-bootstrap';
-import Axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { savePost } from "../api/api-connector";
 
