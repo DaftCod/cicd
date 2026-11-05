@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      image_prefix: ${{ steps.vars.outputs.image_prefix }}
+      tag: ${{ steps.vars.outputs.tag }}
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: vars
+        run: |
+          echo "image_prefix=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:  ['backend/**']
+            frontend: ['frontend/**']
+
+  # ─────────────── FRONTEND ───────────────
+  frontend:
+    needs: setup
+    if: needs.setup.outputs.frontend == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: nginx -t
+        run: >
+          docker run --rm
+          -v "$PWD/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro"
+          nginx:1.28-alpine nginx -t
+      - run: npm test -- --watchAll=false
+
+  # ─────────────── BACKEND ───────────────
+  backend-test:
+    needs: setup
+    if: needs.setup.outputs.backend == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: app
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ci_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ci_test
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      SERVER_PORT: "8080"
+      MANAGEMENT_SERVER_PORT: "8081"
+      FLUENTD_ENABLED: "false"
+      FLUENTD_HOST: localhost
+      FLUENTD_PORT: "24224"
+      DEBUG: "false"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: backend/build/test-results/
+          if-no-files-found: ignore
+
+  # ─────────────── BUILD ───────────────
+  build:
+    needs: [setup, frontend, backend-test]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ needs.setup.outputs.image_prefix }}/${{ matrix.service }}:${{ needs.setup.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ─────────────── SMOKE ───────────────
+  smoke-test:
+    needs: [setup, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      REGISTRY_IMAGE: ${{ needs.setup.outputs.image_prefix }}
+      IMAGE_TAG: ${{ needs.setup.outputs.tag }}
+      ENV_FILE: ${{ github.workspace }}/ci.env
+      COMPOSE: docker compose -p smoke -f deploy/compose.yml --env-file ci.env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: CI env file
+        run: |
+          cat > ci.env <<'EOF'
+          HTTP_PORT=8088
+          POSTGRES_HOST=db
+          POSTGRES_PORT=5432
+          POSTGRES_DB=app
+          POSTGRES_USER=app
+          POSTGRES_PASSWORD=ci_smoke
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_PASSWORD=
+          SERVER_PORT=8080
+          MANAGEMENT_SERVER_PORT=8081
+          FLUENTD_ENABLED=false
+          FLUENTD_HOST=localhost
+          FLUENTD_PORT=24224
+          DEBUG=false
+          EOF
+      - run: $COMPOSE up -d --wait --wait-timeout 180
+      - run: curl -fsS http://localhost:8088/api/v1/posts
+      - name: Logs on failure
+        if: failure()
+        run: $COMPOSE logs
+
+  # ─────────────── DEPLOY STAGING ───────────────
+  deploy-staging:
+    needs: [setup, smoke-test]
+    runs-on: [self-hosted, deploy-wsl]
+    environment:
+      name: staging
+      url: http://localhost:8090
+    concurrency: deploy-staging
+    permissions:
+      contents: read
+      packages: read
+    env:
+      REGISTRY_IMAGE: ${{ needs.setup.outputs.image_prefix }}
+      IMAGE_TAG: ${{ needs.setup.outputs.tag }}
+      ENV_FILE: /opt/javaapp/gh-staging/.env
+      COMPOSE: docker compose -p javaapp-gh-staging -f deploy/compose.yml --env-file /opt/javaapp/gh-staging/.env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: $COMPOSE pull --quiet
+      - run: $COMPOSE up -d --wait --wait-timeout 180
+      - run: curl -fsS -o /dev/null http://localhost:8090/api/v1/posts
+      - run: $COMPOSE ps
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io

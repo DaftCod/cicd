@@ -1,0 +1,45 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия для деплоя (например, v0.2.0)"
+        required: true
+
+concurrency: deploy-production
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, deploy-wsl]
+    environment:
+      name: production
+      url: http://localhost:8000
+    env:
+      VERSION: ${{ inputs.version }}
+      ENV_FILE: /opt/javaapp/gh-production/.env
+      COMPOSE: docker compose -p javaapp-gh-production -f deploy/compose.yml --env-file /opt/javaapp/gh-production/.env
+    steps:
+      - name: Validate version
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Неверный формат версии: $VERSION"; exit 1; }
+          echo "REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$VERSION" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: $COMPOSE pull --quiet
+      - run: $COMPOSE up -d --wait --wait-timeout 180
+      - run: curl -fsS -o /dev/null http://localhost:8000/api/v1/posts
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io
