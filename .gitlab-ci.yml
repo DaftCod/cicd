@@ -207,7 +207,7 @@ smoke-test:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - echo "Deploying $IMAGE_TAG to $CI_ENVIRONMENT_NAME"
-    - $COMPOSE pull
+    - $COMPOSE pull --quiet
     - $COMPOSE up -d --wait --wait-timeout 180
     - curl -fsS -o /dev/null "$CI_ENVIRONMENT_URL/api/v1/posts"
     - $COMPOSE ps
